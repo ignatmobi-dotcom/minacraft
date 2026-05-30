@@ -1,0 +1,70 @@
+name: Build Minacraft
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:   # кнопка ручного запуска в GitHub UI
+
+jobs:
+  # ── Windows EXE ────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pygame numpy pyinstaller
+
+      - name: Build EXE
+        run: python -m PyInstaller minacraft.spec --clean --noconfirm
+
+      - name: Package ZIP
+        run: |
+          cd dist
+          powershell Compress-Archive -Path Minacraft -DestinationPath Minacraft-1.0-beta-windows.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minacraft-1.0-beta-windows
+          path: dist/Minacraft-1.0-beta-windows.zip
+          retention-days: 90
+
+  # ── macOS DMG ──────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-13       # Intel runner — совместим с macOS 12+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pygame numpy pyinstaller
+
+      - name: Build .app
+        run: python -m PyInstaller minacraft.spec --clean --noconfirm
+
+      - name: Package DMG
+        run: |
+          APP="dist/Minacraft.app"
+          DMG="dist/Minacraft-1.0-beta.dmg"
+          TMP="/tmp/mc_build.dmg"
+          hdiutil create -size 400m -fs HFS+ -volname "Minacraft" -o "$TMP"
+          hdiutil attach "$TMP" -mountpoint /Volumes/Minacraft
+          cp -R "$APP" /Volumes/Minacraft/
+          ln -sf /Applications /Volumes/Minacraft/Applications
+          hdiutil detach /Volumes/Minacraft
+          hdiutil convert "$TMP" -format UDZO -imagekey zlib-level=9 -o "$DMG"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minacraft-1.0-beta-macos
+          path: dist/Minacraft-1.0-beta.dmg
+          retention-days: 90

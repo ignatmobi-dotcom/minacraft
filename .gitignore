@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec.bak
+saves/
+learning_data/
+.DS_Store
+*.dmg
+*.egg-info/
+.env
