@@ -124,7 +124,11 @@ _FLAMMABLE_DROPS: dict = {
 }
 _BURN_TIME = 1.0   # seconds for a tile to finish burning
 
-SKINS_DIR = Path("resources/Faithful-32x-1.21.11/assets/minecraft/textures/entity/player/wide")
+def _pkg_dir() -> Path:
+    import sys as _sys
+    return Path(getattr(_sys, "_MEIPASS", "."))
+
+SKINS_DIR = _pkg_dir() / "resources/Faithful-32x-1.21.11/assets/minecraft/textures/entity/player/wide"
 _DEFAULT_SKIN = "steve"
 
 
