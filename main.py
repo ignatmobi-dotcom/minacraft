@@ -3315,6 +3315,8 @@ def main():
     pygame.init()
     sounds.init()
     pygame.display.set_caption(f"Minacraft {GAME_VERSION}")
+    from assets import load_texture as _lt
+    pygame.display.set_icon(_lt("block/grass_block_side", 32))
     clock = pygame.time.Clock()
 
     # Stage 1: choose resolution
