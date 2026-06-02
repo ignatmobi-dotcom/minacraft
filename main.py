@@ -45,6 +45,109 @@ from mobs import (Mob, Projectile, spawn_mobs, spawn_nether_mobs, spawn_end_mobs
 import os as _os
 import sys as _sys
 from learning import PlayerLogger, collect_state, collect_action
+from ai_player import BotBrain, draw_bot, _state_to_vec as _bot_state_vec
+
+# ── Никнейм ───────────────────────────────────────────────────────────────────
+
+_PLAYER_NICKNAME: str = "Player"
+
+_PROFANITY = frozenset({
+    "fuck", "shit", "bitch", "ass", "asshole", "bastard", "cunt", "dick",
+    "cock", "pussy", "faggot", "fag", "nigger", "nigga", "retard", "whore",
+    "slut", "piss", "damn", "hell", "crap", "idiot", "moron", "stupid",
+    "kill", "rape", "sex", "porn", "nude", "naked", "wtf", "stfu",
+})
+
+
+def _is_clean_nick(nick: str) -> bool:
+    low = nick.lower()
+    for word in _PROFANITY:
+        if word in low:
+            return False
+    return True
+
+
+class NicknameScreen:
+    """Экран ввода никнейма — появляется один раз после выбора разрешения."""
+
+    MAX_LEN = 16
+    ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+    def __init__(self, sw: int, sh: int):
+        self.sw, self.sh = sw, sh
+        self.text   = ""
+        self.done   = False
+        self.error  = ""
+        self._font_big  = pygame.font.SysFont(None, 56)
+        self._font_mid  = pygame.font.SysFont(None, 36)
+        self._font_hint = pygame.font.SysFont(None, 24)
+        self._cursor_t  = 0.0
+
+    def handle_event(self, ev) -> None:
+        if ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_RETURN:
+                self._submit()
+            elif ev.key == pygame.K_BACKSPACE:
+                self.text = self.text[:-1]
+                self.error = ""
+            else:
+                ch = ev.unicode
+                if ch in self.ALLOWED and len(self.text) < self.MAX_LEN:
+                    self.text += ch
+                    self.error = ""
+
+    def _submit(self):
+        nick = self.text.strip()
+        if len(nick) < 2:
+            self.error = "Минимум 2 символа!"
+            return
+        if not _is_clean_nick(nick):
+            self.error = "Такой ник не разрешён."
+            return
+        global _PLAYER_NICKNAME
+        _PLAYER_NICKNAME = nick
+        self.done = True
+
+    def update(self, dt: float):
+        self._cursor_t += dt
+
+    def draw(self, screen: pygame.Surface):
+        screen.fill((12, 10, 20))
+
+        # Заголовок
+        title = self._font_big.render("Введи свой ник", True, (220, 200, 255))
+        screen.blit(title, (self.sw // 2 - title.get_width() // 2, self.sh // 3 - 50))
+
+        # Поле ввода
+        box_w, box_h = 360, 52
+        box_x = self.sw // 2 - box_w // 2
+        box_y = self.sh // 2 - box_h // 2
+        pygame.draw.rect(screen, (40, 35, 60), (box_x, box_y, box_w, box_h), border_radius=8)
+        pygame.draw.rect(screen, (140, 120, 200), (box_x, box_y, box_w, box_h), 2, border_radius=8)
+
+        # Текст + курсор
+        cursor = "|" if int(self._cursor_t * 2) % 2 == 0 else ""
+        display = self.text + cursor
+        txt_surf = self._font_mid.render(display, True, (255, 255, 255))
+        screen.blit(txt_surf, (box_x + 12, box_y + (box_h - txt_surf.get_height()) // 2))
+
+        # Подсказка
+        hint = self._font_hint.render(
+            "Только латинские буквы, цифры и _ (2–16 символов)", True, (120, 110, 150))
+        screen.blit(hint, (self.sw // 2 - hint.get_width() // 2, box_y + box_h + 12))
+
+        # Ошибка
+        if self.error:
+            err = self._font_hint.render(self.error, True, (255, 80, 80))
+            screen.blit(err, (self.sw // 2 - err.get_width() // 2, box_y + box_h + 38))
+
+        # Кнопка
+        btn_col = (80, 60, 140) if len(self.text) >= 2 else (40, 35, 55)
+        pygame.draw.rect(screen, btn_col, (self.sw // 2 - 80, box_y + box_h + 68, 160, 40),
+                         border_radius=8)
+        btn_txt = self._font_hint.render("Подтвердить  [Enter]", True, (200, 180, 255))
+        screen.blit(btn_txt, (self.sw // 2 - btn_txt.get_width() // 2, box_y + box_h + 80))
+
 
 def _default_saves_dir() -> Path:
     """Return platform-appropriate saves directory for packaged app."""
@@ -1183,6 +1286,21 @@ class GameSession:
         self._game_won    = False    # set when dragon is defeated
         self._win_t       = 0.0     # scroll timer for end poem
         self._minigun_burst = 0     # accumulated shots for batch logging
+
+        # ── ИИ-игрок ──────────────────────────────────────────────────────
+        self.bot_brain = BotBrain()
+        n = self.bot_brain.load()
+        if n > 0:
+            _log.info("AI-игрок загружен: %d семплов", n)
+            bx = self.player.x + 64
+            by = self.player.y
+            from world import Player as _Player
+            self.bot_player = _Player(x=bx, y=by)
+            self.bot_active = True
+        else:
+            self.bot_player = None
+            self.bot_active = False
+            _log.info("AI-игрок: нет обучающих данных, бот отключён")
 
         if data and data.get("nether_world"):
             self.world_nether = World.from_dict(data["nether_world"])
@@ -2564,6 +2682,36 @@ class GameSession:
 
         self.chat.update(dt)
 
+        # Bot AI tick
+        if self.bot_active and self.bot_player:
+            pcx = self.bot_player.x + 12
+            pcy = self.bot_player.y + 24
+            mobs_near = []
+            for _mob in self.mobs:
+                if not _mob.alive:
+                    continue
+                dist = math.hypot(getattr(_mob, "x", 0) + 12 - pcx,
+                                  getattr(_mob, "y", 0) + 24 - pcy)
+                if dist <= 10 * TILE_SIZE:
+                    mobs_near.append({
+                        "dx": (getattr(_mob, "x", 0) + 12 - pcx) / TILE_SIZE,
+                        "dy": (getattr(_mob, "y", 0) + 24 - pcy) / TILE_SIZE,
+                    })
+            _bot_sd = {
+                "vx": self.bot_player.vx,
+                "vy": self.bot_player.vy,
+                "on_ground": self.bot_player.on_ground,
+                "hp": self.bot_player.hp,
+                "max_hp": self.bot_player.max_hp,
+                "mobs_nearby": mobs_near,
+                "time_of_day": self.day_time / DAY_CYCLE_LEN,
+                "dimension": self.dimension,
+            }
+            _bot_vec = _bot_state_vec(_bot_sd)
+            _bot_action = self.bot_brain.decide(_bot_vec)
+            _bot_keys = self.bot_brain.keys_for(_bot_action)
+            update_player(self.bot_player, self.world, _bot_keys, 0)
+
         now = time.time()
         if now - self._autosave_t > 60:
             _save(self.slot, self.world_ow, self.player, self.inv,
@@ -2599,6 +2747,9 @@ class GameSession:
         draw_player(screen, self.player, self.camera,
                     self.inv.held, self.inv.off_hand, self.skin,
                     attack_swing=self._swing_t, armor=_armor)
+
+        if self.bot_active and self.bot_player:
+            draw_bot(screen, self.bot_player, self.camera, _PLAYER_NICKNAME + "_bot")
 
         # Muzzle flash — drawn in world-space after player
         if self._muzzle_flash_t > 0:
@@ -3341,8 +3492,9 @@ def main():
         global _is_fullscreen
         _is_fullscreen = False   # reset: new windowed surface
 
-    # Main loop — world_select ↔ playing ↔ paused ↔ help
-    state    = "world_select"
+    # Main loop — nickname → world_select ↔ playing ↔ paused ↔ help
+    state    = "nickname" if _LAUNCHER_SLOT is None else "world_select"
+    nick_screen: Optional[NicknameScreen] = NicknameScreen(sw, sh) if _LAUNCHER_SLOT is None else None
     ws_menu  = WorldSelectMenu(sw, sh)
     help_screen: Optional[HelpScreen] = None
     session: Optional[GameSession] = None
@@ -3360,8 +3512,20 @@ def main():
     while True:
         clock.tick(FPS)
 
+        # ── Nickname input ────────────────────────────────────────────────
+        if state == "nickname":
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                nick_screen.handle_event(ev)
+            nick_screen.update(clock.get_time() / 1000.0)
+            nick_screen.draw(screen)
+            pygame.display.flip()
+            if nick_screen.done:
+                state = "world_select"
+
         # ── World select ──────────────────────────────────────────────────
-        if state == "world_select":
+        elif state == "world_select":
             slots = ws_menu._slots()
             for ev in pygame.event.get():
                 result = ws_menu.handle_event(ev, slots)
@@ -3456,4 +3620,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback as _tb
+        _log_path = Path.home() / "Desktop" / "minacraft_crash.log"
+        try:
+            with open(_log_path, "w", encoding="utf-8") as _cf:
+                _tb.print_exc(file=_cf)
+        except Exception:
+            pass
+        raise
