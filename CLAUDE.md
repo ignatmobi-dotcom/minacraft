@@ -354,12 +354,29 @@ def generate_name(tags: set, counts: dict) -> str:
 - [x] Добавлен внутриигровой чат (T — открыть, Enter — отправить) ✅
   - Команды: `/give <item> [count]`, `/tp <x> <y>`, `/heal`, `/time day|night`
 
-### ⚠️ Известная проблема при компиляции (PyInstaller / .app):
-- **Скины не работают в .app**: `SKINS_DIR` в `main.py` определён как относительный путь
-  `Path("resources/Faithful-32x-1.21.11/.../wide")` — не резолвится в frozen-приложении.
-- **Исправление**: заменить на `_pkg_dir() / "resources/Faithful-32x-1.21.11/assets/minecraft/textures/entity/player/wide"`,
-  где `_pkg_dir()` из `assets.py` возвращает `sys._MEIPASS` для frozen и `Path(".")` иначе.
-- Пока не исправлено — применить перед следующей сборкой.
+- [x] Скины исправлены: `SKINS_DIR = _pkg_dir() / "resources/..."` — корректно резолвится в frozen .app ✅
+
+---
+
+## Задачи v1.0-beta-patch2 (текущая версия)
+
+### Реализованные изменения:
+- [x] **ИИ-игрок** (`ai_player.py`): поведенческое клонирование на KNN (k=7) по обучающим данным из `learning_data/*.jsonl` ✅
+  - `BotBrain.load()` — загружает до 20 000 семплов, строит матрицу признаков N×12
+  - `BotBrain.decide(vec)` — KNN через `np.argpartition`, голосование по move_x/jump/lmb
+  - `draw_bot()` — синяя фигурка с меткой `[AI] nickname_bot`, HP-бар, анимация ходьбы
+  - Бот инстанцируется в `GameSession.__init__` только при наличии обучающих данных
+  - Тикается каждый кадр: строится state_dict из bot_player + мобы, вызывается `update_player`
+- [x] **Экран никнейма** (`NicknameScreen` в `main.py`): появляется один раз после выбора разрешения ✅
+  - Только латинские буквы, цифры, `_` (2–16 символов)
+  - Проверка на мат/ругательства (`_PROFANITY` frozenset, substring-поиск)
+  - Ник хранится в `_PLAYER_NICKNAME`, отображается в имени бота
+  - Launcher-bypass пропускает экран никнейма
+- [x] **Лог крашей**: при необработанном исключении трейсбек пишется в `~/Desktop/minacraft_crash.log` ✅
+- [x] **CI/CD** (`.github/workflows/build.yml`): Windows EXE и macOS DMG собираются в GitHub Actions ✅
+- [x] **Лицензия** (`LICENSE`): проприетарная, все права защищены, Роман (ignatmobi-dotcom) 2026 ✅
+- [x] **Иконка игры**: `grass_block_side` 32px через `pygame.display.set_icon` ✅
+- [x] **Выстрелы из минигана**: логируются пачками по 100 (счётчик `_minigun_burst`) ✅
 
 ---
 
