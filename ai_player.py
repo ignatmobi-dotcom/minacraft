@@ -131,15 +131,15 @@ class BotBrain:
     def _idle(self) -> dict:
         return {"move_x": 0, "jump": False, "lmb": False}
 
-    def keys_for(self, action: dict) -> set:
-        """Преобразовать action-словарь в набор pygame-клавиш."""
-        keys: set = set()
+    def keys_for(self, action: dict) -> dict:
+        """Преобразовать action-словарь в dict pygame-клавиш для update_player."""
+        keys: dict = {}
         if action["move_x"] < 0:
-            keys.add(pygame.K_a)
+            keys[pygame.K_a] = True
         elif action["move_x"] > 0:
-            keys.add(pygame.K_d)
+            keys[pygame.K_d] = True
         if action["jump"]:
-            keys.add(pygame.K_w)
+            keys[pygame.K_w] = True
         return keys
 
 
