@@ -63,6 +63,20 @@ def _state_to_vec(s: dict) -> np.ndarray:
     ], dtype=np.float32)
 
 
+# Виды мобов, которые бот считает враждебными
+_HOSTILE_KINDS = frozenset({
+    "zombie", "skeleton", "spider", "creeper",
+    "zombified_piglin", "blaze", "ghast", "enderman",
+    "skeleton_king", "forest_golem", "ender_dragon",
+})
+
+# Дистанции (в пикселях)
+_LEASH_PX   = 15 * 32   # дальше этого — бот бежит к игроку игнорируя всё
+_FIGHT_PX   = 8  * 32   # ближе этого — бот атакует врага
+_ATTACK_PX  = 2.5 * 32  # ближе этого — lmb=True (удар)
+_FOLLOW_GAP = 48         # мёртвая зона следования (~1.5 тайла)
+
+
 class BotBrain:
     """Загружает обучающие данные и принимает решения методом KNN."""
 
@@ -74,6 +88,7 @@ class BotBrain:
         self._actions: list = []               # список action-словарей
         self._ready = False
         self._tick = 0
+        self.goal: str = "idle"               # текущая цель для HUD
 
     def load(self) -> int:
         """Загрузить данные из всех jsonl-файлов. Вернуть число семплов."""
@@ -131,6 +146,67 @@ class BotBrain:
     def _idle(self) -> dict:
         return {"move_x": 0, "jump": False, "lmb": False}
 
+    def decide_with_goals(
+        self,
+        state_vec: np.ndarray,
+        bot_x: float, bot_y: float,
+        player_x: float, player_y: float,
+        mobs: list,
+    ) -> dict:
+        """Цель-ориентированное решение: KNN + приоритетная FSM поверх него."""
+        base = self.decide(state_vec)
+
+        bot_cx  = bot_x + 12
+        bot_cy  = bot_y + 24
+        play_cx = player_x + 12
+        play_cy = player_y + 24
+
+        dist_player = math.hypot(play_cx - bot_cx, play_cy - bot_cy)
+
+        # Приоритет 1: слишком далеко от игрока — возврат
+        if dist_player > _LEASH_PX:
+            self.goal = "return"
+            dx = play_cx - bot_cx
+            move_x = 1 if dx > 16 else (-1 if dx < -16 else 0)
+            jump = play_cy < bot_cy - 32
+            return {"move_x": move_x, "jump": jump, "lmb": False}
+
+        # Приоритет 2: найти ближайшего враждебного моба
+        nearest_mob  = None
+        nearest_dist = float("inf")
+        for mob in mobs:
+            if not getattr(mob, "alive", False):
+                continue
+            if getattr(mob, "kind", "") not in _HOSTILE_KINDS:
+                continue
+            mx = getattr(mob, "x", 0) + 12
+            my = getattr(mob, "y", 0) + 24
+            d  = math.hypot(mx - bot_cx, my - bot_cy)
+            if d < nearest_dist:
+                nearest_dist = d
+                nearest_mob  = mob
+
+        if nearest_mob and nearest_dist < _FIGHT_PX:
+            self.goal = "fight"
+            mx = getattr(nearest_mob, "x", 0) + 12
+            my = getattr(nearest_mob, "y", 0) + 24
+            dx = mx - bot_cx
+            move_x = 1 if dx > 8 else (-1 if dx < -8 else 0)
+            lmb  = nearest_dist < _ATTACK_PX
+            jump = base["jump"] or (my < bot_cy - 24)
+            return {"move_x": move_x, "jump": jump, "lmb": lmb}
+
+        # Приоритет 3: следовать за игроком
+        self.goal = "follow"
+        dx = play_cx - bot_cx
+        if abs(dx) > _FOLLOW_GAP:
+            move_x = 1 if dx > 0 else -1
+        else:
+            move_x = 0
+        # Прыжок если игрок заметно выше и мы рядом по горизонтали
+        jump = base["jump"] or (play_cy < bot_cy - 32 and abs(dx) < 5 * 32)
+        return {"move_x": move_x, "jump": jump, "lmb": False}
+
     def keys_for(self, action: dict) -> dict:
         """Преобразовать action-словарь в dict pygame-клавиш для update_player."""
         keys: dict = {}
@@ -152,7 +228,13 @@ _BOT_EYE   = (255, 255, 100)
 _BOT_NAME_FONT: Optional[pygame.font.Font] = None
 
 
-def draw_bot(screen: pygame.Surface, bot_player, camera, nickname: str = "Bot"):
+_GOAL_ICON = {"follow": "→", "fight": "⚔", "return": "↩", "idle": "…"}
+_GOAL_COL  = {"follow": (160, 220, 160), "fight": (255, 100, 80),
+               "return": (255, 220, 60),  "idle":  (160, 160, 160)}
+
+
+def draw_bot(screen: pygame.Surface, bot_player, camera,
+             nickname: str = "Bot", goal: str = "idle"):
     """Нарисовать ИИ-игрока — упрощённый вариант draw_player с синей палитрой."""
     global _BOT_NAME_FONT
     if _BOT_NAME_FONT is None:
@@ -212,8 +294,10 @@ def draw_bot(screen: pygame.Surface, bot_player, camera, nickname: str = "Bot"):
     eye_x = hx + lean + (head_w * 2 // 3 if f > 0 else head_w // 5)
     pygame.draw.rect(screen, _BOT_EYE, (eye_x, hy + head_h // 3, 4, 4))
 
-    # Никнейм над головой
-    label = _BOT_NAME_FONT.render(f"[AI] {nickname}", True, (180, 220, 255))
+    # Никнейм + иконка цели над головой
+    icon     = _GOAL_ICON.get(goal, "")
+    icon_col = _GOAL_COL.get(goal, (180, 220, 255))
+    label    = _BOT_NAME_FONT.render(f"[AI] {nickname}  {icon}", True, icon_col)
     screen.blit(label, (sx + W // 2 - label.get_width() // 2, hy - 18))
 
     # HP-бар

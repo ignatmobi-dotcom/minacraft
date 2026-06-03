@@ -1297,9 +1297,11 @@ class GameSession:
             from world import Player as _Player
             self.bot_player = _Player(x=bx, y=by)
             self.bot_active = True
+            self._bot_attack_cd = 0.0
         else:
             self.bot_player = None
             self.bot_active = False
+            self._bot_attack_cd = 0.0
             _log.info("AI-игрок: нет обучающих данных, бот отключён")
 
         if data and data.get("nether_world"):
@@ -2683,19 +2685,21 @@ class GameSession:
         self.chat.update(dt)
 
         # Bot AI tick
+        self._bot_attack_cd = max(0.0, self._bot_attack_cd - dt)
         if self.bot_active and self.bot_player:
-            pcx = self.bot_player.x + 12
-            pcy = self.bot_player.y + 24
+            # Состояние бота → вектор для KNN
+            bot_cx = self.bot_player.x + 12
+            bot_cy = self.bot_player.y + 24
             mobs_near = []
             for _mob in self.mobs:
                 if not _mob.alive:
                     continue
-                dist = math.hypot(getattr(_mob, "x", 0) + 12 - pcx,
-                                  getattr(_mob, "y", 0) + 24 - pcy)
+                dist = math.hypot(getattr(_mob, "x", 0) + 12 - bot_cx,
+                                  getattr(_mob, "y", 0) + 24 - bot_cy)
                 if dist <= 10 * TILE_SIZE:
                     mobs_near.append({
-                        "dx": (getattr(_mob, "x", 0) + 12 - pcx) / TILE_SIZE,
-                        "dy": (getattr(_mob, "y", 0) + 24 - pcy) / TILE_SIZE,
+                        "dx": (getattr(_mob, "x", 0) + 12 - bot_cx) / TILE_SIZE,
+                        "dy": (getattr(_mob, "y", 0) + 24 - bot_cy) / TILE_SIZE,
                     })
             _bot_sd = {
                 "vx": self.bot_player.vx,
@@ -2708,9 +2712,29 @@ class GameSession:
                 "dimension": self.dimension,
             }
             _bot_vec = _bot_state_vec(_bot_sd)
-            _bot_action = self.bot_brain.decide(_bot_vec)
+            # Цель-ориентированное решение
+            _bot_action = self.bot_brain.decide_with_goals(
+                _bot_vec,
+                self.bot_player.x, self.bot_player.y,
+                self.player.x, self.player.y,
+                self.mobs,
+            )
             _bot_keys = self.bot_brain.keys_for(_bot_action)
             update_player(self.bot_player, self.world, _bot_keys, 0)
+
+            # Атака ближайшего враждебного моба при lmb=True
+            if _bot_action["lmb"] and self._bot_attack_cd <= 0:
+                for _mob in self.mobs:
+                    if not _mob.alive:
+                        continue
+                    _mx = getattr(_mob, "x", 0) + 12
+                    _my = getattr(_mob, "y", 0) + 24
+                    if math.hypot(_mx - bot_cx, _my - bot_cy) < 2.5 * TILE_SIZE:
+                        _mob.hp -= 3
+                        self._bot_attack_cd = 0.55
+                        if _mob.hp <= 0:
+                            _mob.alive = False
+                        break
 
         now = time.time()
         if now - self._autosave_t > 60:
@@ -2749,7 +2773,8 @@ class GameSession:
                     attack_swing=self._swing_t, armor=_armor)
 
         if self.bot_active and self.bot_player:
-            draw_bot(screen, self.bot_player, self.camera, _PLAYER_NICKNAME + "_bot")
+            draw_bot(screen, self.bot_player, self.camera,
+                     _PLAYER_NICKNAME + "_bot", self.bot_brain.goal)
 
         # Muzzle flash — drawn in world-space after player
         if self._muzzle_flash_t > 0:
