@@ -76,6 +76,30 @@ _FIGHT_PX   = 8  * 32   # ближе этого — бот атакует вра
 _ATTACK_PX  = 2.5 * 32  # ближе этого — lmb=True (удар)
 _FOLLOW_GAP = 48         # мёртвая зона следования (~1.5 тайла)
 
+BOT_NAMES       = ["Alex", "Steve", "Luna", "Max", "Dave"]
+ANARCHIST_NAMES = ["Griefer", "Herobrine", "Null"]
+
+# (список подстрок для поиска, список вариантов ответа)
+_RESP_NORMAL: list = [
+    (["привет", "hello", "hi", "хай"],      ["Привет!", "Здарова!", "О, привет!"]),
+    (["как дела", "как ты"],                 ["Норм, слежу за тобой.", "Мочу мобов!"]),
+    (["помо", "help", "спаси"],              ["Уже иду!", "Держись, прикрою!", "Рядом!"]),
+    (["стоп", "stop", "отойди", "назад"],   ["Ладно.", "Стою.", "Хорошо."]),
+    (["атак", "kill", "бей", "убей"],        ["Атакую!", "Иду бить!", "Уже!"]),
+    (["спасибо", "thanks"],                  ["Пожалуйста!", "Всегда рад помочь!"]),
+    (["кто", "who", "имя", "name"],          ["Твой союзник.", "Я ИИ-боец."]),
+    (["пока", "bye", "до свид"],             ["Пока!", "Удачи!", "До встречи."]),
+]
+_RESP_ANARCHIST: list = [
+    (["привет", "hello", "hi"],              ["...", "Не мешай.", "Иди отсюда."]),
+    (["помо", "help", "спаси"],              ["Сам разбирайся.", "Нет.", "Хах."]),
+    (["стоп", "stop", "отойди"],             ["Нет.", "Не твоё дело.", "Попробуй."]),
+    (["атак", "kill", "бей"],                ["Атакую. Тебя.", "Уже. Угадай кого."]),
+    (["спасибо", "thanks"],                  ["...", "Смешно.", "За что?"]),
+    (["кто", "who", "имя"],                  ["Не твоё дело.", "Сам догадайся."]),
+    (["пока", "bye"],                         ["Скоро вернёшься.", "Ха.", "..."]),
+]
+
 
 class BotBrain:
     """Загружает обучающие данные и принимает решения методом KNN."""
@@ -83,12 +107,13 @@ class BotBrain:
     K = 7       # число соседей для голосования
     MAX_SAMPLES = 20_000  # ограничение для быстрого запуска
 
-    def __init__(self):
+    def __init__(self, personality: str = "normal"):
         self._X: Optional[np.ndarray] = None   # матрица признаков N×D
         self._actions: list = []               # список action-словарей
         self._ready = False
         self._tick = 0
         self.goal: str = "idle"               # текущая цель для HUD
+        self.personality: str = personality   # "normal" | "anarchist"
 
     def load(self) -> int:
         """Загрузить данные из всех jsonl-файлов. Вернуть число семплов."""
@@ -146,6 +171,20 @@ class BotBrain:
     def _idle(self) -> dict:
         return {"move_x": 0, "jump": False, "lmb": False}
 
+    def chat_respond(self, message: str) -> Optional[str]:
+        """Вернуть ответ на сообщение игрока (или None при случайном молчании)."""
+        if random.random() < 0.15:   # иногда игнорирует
+            return None
+        msg   = message.lower()
+        table = _RESP_ANARCHIST if self.personality == "anarchist" else _RESP_NORMAL
+        for keywords, replies in table:
+            if any(kw in msg for kw in keywords):
+                return random.choice(replies)
+        # Дефолтный ответ
+        if self.personality == "anarchist":
+            return random.choice(["...", "Отстань.", "Молчи."])
+        return random.choice(["Понял.", "Ок.", "Слышу тебя."])
+
     def decide_with_goals(
         self,
         state_vec: np.ndarray,
@@ -171,7 +210,16 @@ class BotBrain:
             jump = play_cy < bot_cy - 32
             return {"move_x": move_x, "jump": jump, "lmb": False}
 
-        # Приоритет 2: найти ближайшего враждебного моба
+        # Приоритет 2: анархист атакует игрока
+        if self.personality == "anarchist" and dist_player < _FIGHT_PX:
+            self.goal = "attack_player"
+            dx = play_cx - bot_cx
+            move_x = 1 if dx > 8 else (-1 if dx < -8 else 0)
+            lmb    = dist_player < _ATTACK_PX
+            jump   = base["jump"] or (play_cy < bot_cy - 24)
+            return {"move_x": move_x, "jump": jump, "lmb": lmb}
+
+        # Приоритет 3: найти ближайшего враждебного моба
         nearest_mob  = None
         nearest_dist = float("inf")
         for mob in mobs:
@@ -221,24 +269,37 @@ class BotBrain:
 
 # ── Отрисовка бота ────────────────────────────────────────────────────────────
 
-_BOT_SKIN  = (90,  160, 255)   # синеватый оттенок тела
-_BOT_SKIN2 = (60,  120, 210)
-_BOT_OUT   = (20,   40, 100)
-_BOT_EYE   = (255, 255, 100)
+_BOT_EYE       = (255, 255, 100)
+_AN_EYE        = (255,  80,   0)
 _BOT_NAME_FONT: Optional[pygame.font.Font] = None
 
 
-_GOAL_ICON = {"follow": "→", "fight": "⚔", "return": "↩", "idle": "…"}
+_GOAL_ICON = {"follow": "→", "fight": "⚔", "return": "↩",
+              "idle": "…", "attack_player": "☠"}
 _GOAL_COL  = {"follow": (160, 220, 160), "fight": (255, 100, 80),
-               "return": (255, 220, 60),  "idle":  (160, 160, 160)}
+               "return": (255, 220, 60),  "idle":  (160, 160, 160),
+               "attack_player": (255, 40, 40)}
+
+# Цвета нормального бота
+_BOT_SKIN  = (90,  160, 255)
+_BOT_SKIN2 = (60,  120, 210)
+_BOT_OUT   = (20,   40, 100)
+# Цвета анархиста
+_AN_SKIN   = (200,  50,  50)
+_AN_SKIN2  = (150,  20,  20)
+_AN_OUT    = ( 80,   0,   0)
 
 
 def draw_bot(screen: pygame.Surface, bot_player, camera,
-             nickname: str = "Bot", goal: str = "idle"):
-    """Нарисовать ИИ-игрока — упрощённый вариант draw_player с синей палитрой."""
+             nickname: str = "Bot", goal: str = "idle",
+             personality: str = "normal"):
+    """Нарисовать ИИ-игрока — упрощённый вариант draw_player с синей/красной палитрой."""
     global _BOT_NAME_FONT
     if _BOT_NAME_FONT is None:
         _BOT_NAME_FONT = pygame.font.SysFont(None, 20)
+
+    skin  = (_AN_SKIN,  _AN_SKIN2,  _AN_OUT)  if personality == "anarchist" \
+            else (_BOT_SKIN, _BOT_SKIN2, _BOT_OUT)
 
     from world import PLAYER_W, PLAYER_H, Camera
     sx, sy = camera.world_to_screen(bot_player.x, bot_player.y)
@@ -267,32 +328,35 @@ def draw_bot(screen: pygame.Surface, bot_player, camera,
     def _rect(r, c):
         pygame.draw.rect(screen, c, r)
 
+    c1, c2, cout = skin
+    eye_col = _AN_EYE if personality == "anarchist" else _BOT_EYE
+
     # Ноги
     for lx, off in ((ll_x, int(sw)), (rl_x, int(-sw))):
         y0 = leg_y + max(0, off)
         h  = leg_h - abs(off)
-        _rect((lx + lean, y0, leg_w, max(2, h)), _BOT_SKIN2)
-        pygame.draw.rect(screen, _BOT_OUT, (lx + lean, y0, leg_w, max(2, h)), 1)
+        _rect((lx + lean, y0, leg_w, max(2, h)), c2)
+        pygame.draw.rect(screen, cout, (lx + lean, y0, leg_w, max(2, h)), 1)
 
     # Руки
     for ax, off in ((la_x, int(-sw)), (ra_x, int(sw))):
         y0 = arm_y + max(0, off)
         h  = arm_h - abs(off)
-        _rect((ax + lean, y0, arm_w, max(2, h)), _BOT_SKIN2)
-        pygame.draw.rect(screen, _BOT_OUT, (ax + lean, y0, arm_w, max(2, h)), 1)
+        _rect((ax + lean, y0, arm_w, max(2, h)), c2)
+        pygame.draw.rect(screen, cout, (ax + lean, y0, arm_w, max(2, h)), 1)
 
     # Тело
-    _rect((bx + lean, by, body_w, body_h), _BOT_SKIN)
-    pygame.draw.rect(screen, _BOT_OUT, (bx + lean, by, body_w, body_h), 1)
+    _rect((bx + lean, by, body_w, body_h), c1)
+    pygame.draw.rect(screen, cout, (bx + lean, by, body_w, body_h), 1)
 
     # Голова
-    _rect((hx + lean, hy, head_w, head_h), _BOT_SKIN)
-    pygame.draw.rect(screen, _BOT_OUT, (hx + lean, hy, head_w, head_h), 1)
+    _rect((hx + lean, hy, head_w, head_h), c1)
+    pygame.draw.rect(screen, cout, (hx + lean, hy, head_w, head_h), 1)
 
     # Глаз
     f = getattr(bot_player, "facing", 1)
     eye_x = hx + lean + (head_w * 2 // 3 if f > 0 else head_w // 5)
-    pygame.draw.rect(screen, _BOT_EYE, (eye_x, hy + head_h // 3, 4, 4))
+    pygame.draw.rect(screen, eye_col, (eye_x, hy + head_h // 3, 4, 4))
 
     # Никнейм + иконка цели над головой
     icon     = _GOAL_ICON.get(goal, "")

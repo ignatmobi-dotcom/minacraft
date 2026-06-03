@@ -45,7 +45,8 @@ from mobs import (Mob, Projectile, spawn_mobs, spawn_nether_mobs, spawn_end_mobs
 import os as _os
 import sys as _sys
 from learning import PlayerLogger, collect_state, collect_action
-from ai_player import BotBrain, draw_bot, _state_to_vec as _bot_state_vec
+from ai_player import (BotBrain, draw_bot, _state_to_vec as _bot_state_vec,
+                        BOT_NAMES as _BOT_NAMES, ANARCHIST_NAMES as _ANARCH_NAMES)
 
 # ── Никнейм ───────────────────────────────────────────────────────────────────
 
@@ -1287,22 +1288,33 @@ class GameSession:
         self._win_t       = 0.0     # scroll timer for end poem
         self._minigun_burst = 0     # accumulated shots for batch logging
 
-        # ── ИИ-игрок ──────────────────────────────────────────────────────
-        self.bot_brain = BotBrain()
-        n = self.bot_brain.load()
+        # ── ИИ-игроки (3 штуки) ───────────────────────────────────────────
+        _shared = BotBrain()
+        n = _shared.load()
+        self.bots: list = []          # [{"player","brain","name","attack_cd","hp","max_hp"}]
+        self._bot_reply_queue: list = []  # [(timer_left, "Имя: текст")]
         if n > 0:
-            _log.info("AI-игрок загружен: %d семплов", n)
-            bx = self.player.x + 64
-            by = self.player.y
+            _log.info("AI-игроки загружены: %d семплов", n)
             from world import Player as _Player
-            self.bot_player = _Player(x=bx, y=by)
+            _name_pool = list(_BOT_NAMES)
+            random.shuffle(_name_pool)
+            for i in range(3):
+                is_anarch = random.random() < 0.10
+                pers  = "anarchist" if is_anarch else "normal"
+                bname = random.choice(_ANARCH_NAMES) if is_anarch else _name_pool[i % len(_name_pool)]
+                brain = BotBrain(pers)
+                brain._X      = _shared._X       # разделяем загруженные данные
+                brain._actions = _shared._actions
+                brain._ready  = True
+                bp = _Player(x=self.player.x + (i + 1) * 80, y=self.player.y)
+                self.bots.append({"player": bp, "brain": brain, "name": bname,
+                                   "attack_cd": 0.0, "hp": 20, "max_hp": 20})
+                if is_anarch:
+                    _log.info("  [!] Анархист '%s' появился в мире!", bname)
             self.bot_active = True
-            self._bot_attack_cd = 0.0
         else:
-            self.bot_player = None
             self.bot_active = False
-            self._bot_attack_cd = 0.0
-            _log.info("AI-игрок: нет обучающих данных, бот отключён")
+            _log.info("AI-игроки: нет обучающих данных, боты отключены")
 
         if data and data.get("nether_world"):
             self.world_nether = World.from_dict(data["nether_world"])
@@ -1613,6 +1625,25 @@ class GameSession:
             if not mob.alive:
                 self._on_mob_death(mob)
 
+        # Удар по анархисту
+        for _bot in self.bots:
+            if _bot["brain"].personality != "anarchist":
+                continue
+            _bp  = _bot["player"]
+            _bdx = _bp.x + 12 - pcx
+            _bdy = _bp.y + 24 - pcy
+            _bd  = math.hypot(_bdx, _bdy)
+            if _bd > REACH:
+                continue
+            if (_bdx * dx + _bdy * dy) / (_bd or 1) < -0.25:
+                continue
+            _bot["hp"] = max(0, _bot["hp"] - dmg_base)
+            hit_any = True
+            sounds.play("successful_hit", 0.55)
+            if _bot["hp"] <= 0:
+                self.chat.add_message(f"[!] Ты уничтожил анархиста {_bot['name']}!")
+            break
+
         # Cooldown and swing animation always trigger on click
         self._attack_cd = 0.45
         self._swing_t   = 0.30
@@ -1806,8 +1837,16 @@ class GameSession:
             else:
                 self.chat.add_message(f"Неизвестная команда: /{name}")
         else:
-            # Plain text message — show in chat
-            self.chat.add_message(cmd)
+            # Plain text message — show in chat with player nick
+            self.chat.add_message(f"{_PLAYER_NICKNAME}: {cmd}")
+            # Queue bot responses with random delay
+            for _bot in self.bots:
+                _resp = _bot["brain"].chat_respond(cmd)
+                if _resp:
+                    _delay = random.uniform(0.8, 2.5)
+                    self._bot_reply_queue.append(
+                        (_delay, f"{_bot['name']}: {_resp}")
+                    )
 
     def _spawn_drop(self, stack: ItemStack, wx: float, wy: float,
                     vx_range=(-1.5, 1.5), vy_range=(-3.5, -1.5)):
@@ -2684,12 +2723,25 @@ class GameSession:
 
         self.chat.update(dt)
 
+        # Bot reply queue
+        _new_q = []
+        for _timer, _text in self._bot_reply_queue:
+            _timer -= dt
+            if _timer <= 0:
+                self.chat.add_message(_text)
+            else:
+                _new_q.append((_timer, _text))
+        self._bot_reply_queue = _new_q
+
         # Bot AI tick
-        self._bot_attack_cd = max(0.0, self._bot_attack_cd - dt)
-        if self.bot_active and self.bot_player:
-            # Состояние бота → вектор для KNN
-            bot_cx = self.bot_player.x + 12
-            bot_cy = self.bot_player.y + 24
+        _dead_bots = []
+        for bot in self.bots:
+            bot["attack_cd"] = max(0.0, bot["attack_cd"] - dt)
+            bp = bot["player"]
+            brain = bot["brain"]
+
+            bot_cx = bp.x + 12
+            bot_cy = bp.y + 24
             mobs_near = []
             for _mob in self.mobs:
                 if not _mob.alive:
@@ -2702,39 +2754,47 @@ class GameSession:
                         "dy": (getattr(_mob, "y", 0) + 24 - bot_cy) / TILE_SIZE,
                     })
             _bot_sd = {
-                "vx": self.bot_player.vx,
-                "vy": self.bot_player.vy,
-                "on_ground": self.bot_player.on_ground,
-                "hp": self.bot_player.hp,
-                "max_hp": self.bot_player.max_hp,
+                "vx": bp.vx, "vy": bp.vy, "on_ground": bp.on_ground,
+                "hp": bot["hp"], "max_hp": bot["max_hp"],
                 "mobs_nearby": mobs_near,
                 "time_of_day": self.day_time / DAY_CYCLE_LEN,
                 "dimension": self.dimension,
             }
-            _bot_vec = _bot_state_vec(_bot_sd)
-            # Цель-ориентированное решение
-            _bot_action = self.bot_brain.decide_with_goals(
-                _bot_vec,
-                self.bot_player.x, self.bot_player.y,
-                self.player.x, self.player.y,
-                self.mobs,
+            _bot_vec    = _bot_state_vec(_bot_sd)
+            _bot_action = brain.decide_with_goals(
+                _bot_vec, bp.x, bp.y,
+                self.player.x, self.player.y, self.mobs,
             )
-            _bot_keys = self.bot_brain.keys_for(_bot_action)
-            update_player(self.bot_player, self.world, _bot_keys, 0)
+            update_player(bp, self.world, brain.keys_for(_bot_action), 0)
 
-            # Атака ближайшего враждебного моба при lmb=True
-            if _bot_action["lmb"] and self._bot_attack_cd <= 0:
-                for _mob in self.mobs:
-                    if not _mob.alive:
-                        continue
-                    _mx = getattr(_mob, "x", 0) + 12
-                    _my = getattr(_mob, "y", 0) + 24
-                    if math.hypot(_mx - bot_cx, _my - bot_cy) < 2.5 * TILE_SIZE:
-                        _mob.hp -= 3
-                        self._bot_attack_cd = 0.55
-                        if _mob.hp <= 0:
-                            _mob.alive = False
-                        break
+            if _bot_action["lmb"] and bot["attack_cd"] <= 0:
+                if brain.goal == "attack_player":
+                    # Анархист бьёт игрока
+                    dist_pl = math.hypot(self.player.x + PLAYER_W / 2 - bot_cx,
+                                         self.player.y + PLAYER_H / 2 - bot_cy)
+                    if dist_pl < 2.5 * TILE_SIZE:
+                        self.player.hp = max(0, self.player.hp - 2)
+                        bot["attack_cd"] = 1.0
+                        sounds.play("hurt", 0.35)
+                else:
+                    # Нормальный бот бьёт мобов
+                    for _mob in self.mobs:
+                        if not _mob.alive:
+                            continue
+                        _mx = getattr(_mob, "x", 0) + 12
+                        _my = getattr(_mob, "y", 0) + 24
+                        if math.hypot(_mx - bot_cx, _my - bot_cy) < 2.5 * TILE_SIZE:
+                            _mob.hp -= 3
+                            bot["attack_cd"] = 0.55
+                            if _mob.hp <= 0:
+                                _mob.alive = False
+                            break
+
+            if bot["hp"] <= 0:
+                _dead_bots.append(bot)
+        for _b in _dead_bots:
+            self.chat.add_message(f"[!] {_b['name']} выбыл из игры.")
+            self.bots.remove(_b)
 
         now = time.time()
         if now - self._autosave_t > 60:
@@ -2772,9 +2832,10 @@ class GameSession:
                     self.inv.held, self.inv.off_hand, self.skin,
                     attack_swing=self._swing_t, armor=_armor)
 
-        if self.bot_active and self.bot_player:
-            draw_bot(screen, self.bot_player, self.camera,
-                     _PLAYER_NICKNAME + "_bot", self.bot_brain.goal)
+        for _bot in self.bots:
+            draw_bot(screen, _bot["player"], self.camera,
+                     _bot["name"], _bot["brain"].goal,
+                     _bot["brain"].personality)
 
         # Muzzle flash — drawn in world-space after player
         if self._muzzle_flash_t > 0:
