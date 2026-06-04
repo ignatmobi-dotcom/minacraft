@@ -1308,7 +1308,8 @@ class GameSession:
                 brain._ready  = True
                 bp = _Player(x=self.player.x + (i + 1) * 80, y=self.player.y)
                 self.bots.append({"player": bp, "brain": brain, "name": bname,
-                                   "attack_cd": 0.0, "hp": 20, "max_hp": 20})
+                                   "attack_cd": 0.0,
+                                   "stuck_t": 0.0, "prev_x": bp.x})
                 if is_anarch:
                     _log.info("  [!] Анархист '%s' появился в мире!", bname)
             self.bot_active = True
@@ -1637,10 +1638,10 @@ class GameSession:
                 continue
             if (_bdx * dx + _bdy * dy) / (_bd or 1) < -0.25:
                 continue
-            _bot["hp"] = max(0, _bot["hp"] - dmg_base)
+            _bp.hp = max(0, _bp.hp - dmg_base)
             hit_any = True
             sounds.play("successful_hit", 0.55)
-            if _bot["hp"] <= 0:
+            if _bp.hp <= 0:
                 self.chat.add_message(f"[!] Ты уничтожил анархиста {_bot['name']}!")
             break
 
@@ -2755,7 +2756,7 @@ class GameSession:
                     })
             _bot_sd = {
                 "vx": bp.vx, "vy": bp.vy, "on_ground": bp.on_ground,
-                "hp": bot["hp"], "max_hp": bot["max_hp"],
+                "hp": bp.hp, "max_hp": bp.max_hp,
                 "mobs_nearby": mobs_near,
                 "time_of_day": self.day_time / DAY_CYCLE_LEN,
                 "dimension": self.dimension,
@@ -2765,6 +2766,18 @@ class GameSession:
                 _bot_vec, bp.x, bp.y,
                 self.player.x, self.player.y, self.mobs,
             )
+
+            # Авто-прыжок при застревании у стены
+            if (abs(_bot_action["move_x"]) > 0 and bp.on_ground
+                    and abs(bp.x - bot.get("prev_x", bp.x)) < 1.0):
+                bot["stuck_t"] = bot.get("stuck_t", 0.0) + dt
+                if bot["stuck_t"] > 0.25:
+                    _bot_action["jump"] = True
+                    bot["stuck_t"] = 0.0
+            else:
+                bot["stuck_t"] = 0.0
+            bot["prev_x"] = bp.x
+
             update_player(bp, self.world, brain.keys_for(_bot_action), 0)
 
             if _bot_action["lmb"] and bot["attack_cd"] <= 0:
@@ -2784,13 +2797,22 @@ class GameSession:
                         _mx = getattr(_mob, "x", 0) + 12
                         _my = getattr(_mob, "y", 0) + 24
                         if math.hypot(_mx - bot_cx, _my - bot_cy) < 2.5 * TILE_SIZE:
-                            _mob.hp -= 3
+                            _mob.hp = max(0, _mob.hp - 3)
                             bot["attack_cd"] = 0.55
-                            if _mob.hp <= 0:
-                                _mob.alive = False
+                            if not _mob.alive:
+                                self._on_mob_death(_mob)
                             break
 
-            if bot["hp"] <= 0:
+            # Подбор предметов поблизости
+            for _di in list(self.dropped_items):
+                if math.hypot(_di.x - bot_cx, _di.y - bot_cy) < 1.5 * TILE_SIZE:
+                    self.chat.add_message(
+                        f"{bot['name']}: подобрал {_di.stack.item_id}"
+                    )
+                    self.dropped_items.remove(_di)
+                    break
+
+            if bp.hp <= 0:
                 _dead_bots.append(bot)
         for _b in _dead_bots:
             self.chat.add_message(f"[!] {_b['name']} выбыл из игры.")
